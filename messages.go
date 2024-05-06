@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/aws/aws-sdk-go/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
 // Message serves as the message interface for handling the message
@@ -22,11 +22,11 @@ type Message interface {
 
 // message serves as a wrapper for sqs.Message as well as controls the error handling channel
 type message struct {
-	*sqs.Message
+	*types.Message
 	err chan error
 }
 
-func newMessage(m *sqs.Message) *message {
+func newMessage(m *types.Message) *message {
 	return &message{m, make(chan error, 1)}
 }
 

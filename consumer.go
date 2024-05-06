@@ -7,10 +7,10 @@ import (
 	"log"
 	"time"
 
-	"github.com/aws/aws-sdk-go/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 )
 
-var maxMessages = int64(10)
+var maxMessages = int32(10)
 
 // Consumer provides an interface for receiving messages through AWS SQS and SNS
 type Consumer interface {
@@ -40,7 +40,7 @@ type Consumer interface {
 
 // consumer is a wrapper around sqs.SQS
 type consumer struct {
-	sqs               *sqs.SQS
+	sqs               *sqs.Client
 	handlers          map[string]Handler
 	env               string
 	QueueURL          string
@@ -57,18 +57,18 @@ type consumer struct {
 // NewConsumer creates a new SQS instance and provides a configured consumer interface for
 // receiving and sending messages
 func NewConsumer(c Config, queueName string) (Consumer, error) {
-	if c.SessionProvider == nil {
-		c.SessionProvider = newSession
+	if c.AwsConfigProvider == nil {
+		c.AwsConfigProvider = newAwsConfigs
 	}
 
-	sess, err := c.SessionProvider(c)
+	cfg, err := c.AwsConfigProvider(c)
 
 	if err != nil {
 		return nil, err
 	}
 
 	cons := &consumer{
-		sqs:               sqs.New(sess),
+		sqs:               sqs.NewFromConfig(cfg),
 		env:               c.Env,
 		VisibilityTimeout: 30,
 		workerPool:        30,
@@ -95,7 +95,7 @@ func NewConsumer(c Config, queueName string) (Consumer, error) {
 	// custom QueueURLs can be provided for testing and mocking purposes
 	if cons.QueueURL == "" {
 		name := fmt.Sprintf("%s-%s", c.Env, queueName)
-		o, err := cons.sqs.GetQueueUrl(&sqs.GetQueueUrlInput{QueueName: &name})
+		o, err := cons.sqs.GetQueueUrl(context.TODO(), &sqs.GetQueueUrlInput{QueueName: &name})
 		if err != nil {
 			return nil, err
 		}
@@ -153,7 +153,11 @@ func (c *consumer) Consume() {
 	}
 
 	for {
-		output, err := c.sqs.ReceiveMessage(&sqs.ReceiveMessageInput{QueueUrl: &c.QueueURL, MaxNumberOfMessages: &maxMessages, MessageAttributeNames: []*string{&all}})
+		output, err := c.sqs.ReceiveMessage(context.TODO(),
+			&sqs.ReceiveMessageInput{
+				QueueUrl: &c.QueueURL, MaxNumberOfMessages: maxMessages, MessageAttributeNames: []string{all},
+			},
+		)
 		if err != nil {
 			c.Logger().Println("%s , retrying in 10s", ErrGetMessage.Context(err).Error())
 			time.Sleep(10 * time.Second)
@@ -167,7 +171,7 @@ func (c *consumer) Consume() {
 				continue
 			}
 
-			jobs <- newMessage(m)
+			jobs <- newMessage(&m)
 		}
 	}
 }
@@ -228,7 +232,9 @@ func (c *consumer) MessageSelf(ctx context.Context, event string, body interface
 func (c *consumer) Message(ctx context.Context, queue, event string, body interface{}) {
 	name := fmt.Sprintf("%s-%s", c.env, queue)
 
-	queueResp, err := c.sqs.GetQueueUrl(&sqs.GetQueueUrlInput{QueueName: &name})
+	queueResp, err := c.sqs.GetQueueUrl(context.TODO(),
+		&sqs.GetQueueUrlInput{QueueName: &name},
+	)
 	if err != nil {
 		log.Printf("%s, queue: %s", ErrQueueURL.Context(err).Error(), name)
 		return
@@ -253,7 +259,7 @@ func (c *consumer) Message(ctx context.Context, queue, event string, body interf
 
 // sendDirectMessage is a helper that should be run concurrently since it will block the main thread if there is a connection issue
 func (c *consumer) sendDirectMessage(ctx context.Context, input *sqs.SendMessageInput, event string) {
-	if _, err := c.sqs.SendMessage(input); err != nil {
+	if _, err := c.sqs.SendMessage(context.TODO(), input); err != nil {
 		log.Printf("%s, event: %s \nretrying in 10s", ErrPublish.Context(err).Error(), event)
 		time.Sleep(10 * time.Second)
 		c.sendDirectMessage(ctx, input, event)
@@ -262,7 +268,9 @@ func (c *consumer) sendDirectMessage(ctx context.Context, input *sqs.SendMessage
 
 // delete will remove a message from the queue, this is necessary to fully and successfully consume a message
 func (c *consumer) delete(m *message) error {
-	_, err := c.sqs.DeleteMessage(&sqs.DeleteMessageInput{QueueUrl: &c.QueueURL, ReceiptHandle: m.ReceiptHandle})
+	_, err := c.sqs.DeleteMessage(context.TODO(),
+		&sqs.DeleteMessageInput{QueueUrl: &c.QueueURL, ReceiptHandle: m.ReceiptHandle},
+	)
 	if err != nil {
 		c.Logger().Println(ErrUnableToDelete.Context(err).Error())
 		return ErrUnableToDelete.Context(err)
@@ -270,9 +278,9 @@ func (c *consumer) delete(m *message) error {
 	return nil
 }
 
-func (c *consumer) extend(ctx context.Context, m *message) {
+func (c *consumer) extend(_ context.Context, m *message) {
 	var count int
-	extension := int64(c.VisibilityTimeout)
+	extension := int32(c.VisibilityTimeout)
 	for {
 		//only allow 1 extensions (Default 1m30s)
 		if count >= c.extensionLimit {
@@ -289,8 +297,12 @@ func (c *consumer) extend(ctx context.Context, m *message) {
 			return
 		default:
 			// double the allowed processing time
-			extension = extension + int64(c.VisibilityTimeout)
-			_, err := c.sqs.ChangeMessageVisibility(&sqs.ChangeMessageVisibilityInput{QueueUrl: &c.QueueURL, ReceiptHandle: m.ReceiptHandle, VisibilityTimeout: &extension})
+			extension = extension + int32(c.VisibilityTimeout)
+			_, err := c.sqs.ChangeMessageVisibility(context.TODO(),
+				&sqs.ChangeMessageVisibilityInput{
+					QueueUrl: &c.QueueURL, ReceiptHandle: m.ReceiptHandle, VisibilityTimeout: extension,
+				},
+			)
 			if err != nil {
 				c.Logger().Println(ErrUnableToExtend.Error(), err.Error())
 				return

@@ -1,12 +1,15 @@
 package gosqs
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"testing"
 
-	"github.com/aws/aws-sdk-go/service/sns"
-	"github.com/aws/aws-sdk-go/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
+	snstypes "github.com/aws/aws-sdk-go-v2/service/sns/types"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
 type sample struct {
@@ -56,7 +59,9 @@ func TestNewPublisher(t *testing.T) {
 func retrievePubMessage(t *testing.T, p *publisher, queue string) Message {
 	name := fmt.Sprintf("%s-%s", p.env, queue)
 
-	output, err := p.sqs.ReceiveMessage(&sqs.ReceiveMessageInput{QueueUrl: &name, MessageAttributeNames: []*string{&all}})
+	output, err := p.sqs.ReceiveMessage(context.TODO(),
+		&sqs.ReceiveMessageInput{QueueUrl: &name, MessageAttributeNames: []string{all}},
+	)
 	if err != nil {
 		t.Fatalf("unable to retrieve message, got: %v", err)
 	}
@@ -64,12 +69,14 @@ func retrievePubMessage(t *testing.T, p *publisher, queue string) Message {
 	if len(output.Messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(output.Messages))
 	}
-	_, err = p.sqs.DeleteMessage(&sqs.DeleteMessageInput{QueueUrl: &name, ReceiptHandle: output.Messages[0].ReceiptHandle})
+	_, err = p.sqs.DeleteMessage(context.TODO(),
+		&sqs.DeleteMessageInput{QueueUrl: &name, ReceiptHandle: output.Messages[0].ReceiptHandle},
+	)
 	if err != nil {
 		t.Errorf("could not delete published message, got %v", err)
 	}
 
-	return newMessage(output.Messages[0])
+	return newMessage(&output.Messages[0])
 }
 
 func getPublisher(t *testing.T) *publisher {
@@ -82,14 +89,14 @@ func getPublisher(t *testing.T) *publisher {
 		TopicARN: "arn:aws:sns:local:000000000000:todolist-dev",
 	}
 
-	sess, err := newSession(conf)
+	awsCfg, err := newAwsConfigs(conf)
 	if err != nil {
 		t.Fatalf("could not create session, got %v", err)
 	}
 
 	return &publisher{
-		sqs: sqs.New(sess),
-		sns: sns.New(sess),
+		sqs: sqs.NewFromConfig(awsCfg),
+		sns: sns.NewFromConfig(awsCfg),
 		arn: conf.TopicARN,
 		env: conf.Env,
 	}
@@ -178,8 +185,8 @@ func TestDefaultSNSAttributs(t *testing.T) {
 	st := "String"
 	event := "some_event"
 	att := defaultSNSAttributes(event)
-	expected := map[string]*sns.MessageAttributeValue{
-		"route": &sns.MessageAttributeValue{DataType: &st, StringValue: &event},
+	expected := map[string]*snstypes.MessageAttributeValue{
+		"route": {DataType: &st, StringValue: &event},
 	}
 
 	if !reflect.DeepEqual(expected, att) {
@@ -191,8 +198,8 @@ func TestDefaultSQSAttributs(t *testing.T) {
 	st := "String"
 	event := "some_event"
 	att := defaultSQSAttributes(event)
-	expected := map[string]*sqs.MessageAttributeValue{
-		"route": &sqs.MessageAttributeValue{DataType: &st, StringValue: &event},
+	expected := map[string]*sqstypes.MessageAttributeValue{
+		"route": {DataType: &st, StringValue: &event},
 	}
 
 	if !reflect.DeepEqual(expected, att) {
